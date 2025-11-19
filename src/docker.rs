@@ -166,17 +166,17 @@ async fn get<T: serde::de::DeserializeOwned>(endpoint: &str) -> Option<T> {
 }
 
 pub fn list_containers() -> impl Future<Output = Option<Vec<Container>>> {
-    get("/v1.25/containers/json?all=true")
+    get("/v1.44/containers/json?all=true")
 }
 
 pub async fn inspect_container(id: &str) -> Option<ContainerInspect> {
-    get(format!("/v1.25/containers/{id}/json").as_str()).await
+    get(format!("/v1.44/containers/{id}/json").as_str()).await
 }
 
 pub async fn get_container_stats(id: &str) -> Option<ContainerStats> {
-    get(format!("/v1.25/containers/{id}/stats?stream=false").as_str()).await
+    get(format!("/v1.44/containers/{id}/stats?stream=false").as_str()).await
 }
 
 pub fn get_data_usage() -> impl Future<Output = Option<DataUsage>> {
-    get("/v1.25/system/df")
+    get("/v1.44/system/df")
 }

@@ -24,7 +24,7 @@ To run the exporter, use docker-compose.yml:
 version: '3.7'
   services:
     docker-exporter:
-      image: keramss/docker-exporter:2025-08-16T15-55-36Z
+      image: keramss/docker-exporter
       restart: unless-stopped
       environment:
         # VERBOSE: 'true'
@@ -43,7 +43,7 @@ docker run -d \
     --name docker-exporter \
     -p 9417:9417 \
     -v /var/run/docker.sock:/var/run/docker.sock \
-    keramss/docker-exporter:2025-08-16T15-55-36Z
+    keramss/docker-exporter
 ```
 
 Finally, add a new job to `prometheus.yml`.
@@ -58,7 +58,7 @@ scrape_configs:
 
 ## Docker API compatibility
 
-Unix socket only. Requires that the minimum supported API version of your Docker engine be 1.25 or lower.
+Unix socket only. Requires that the minimum supported API version of your Docker engine be 1.25 or lower. Starting from tag `2025-11-19T19-20-58Z`, this is 1.44 or lower.
 
 ## Collected metrics
 

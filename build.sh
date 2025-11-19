@@ -4,6 +4,7 @@ GIT_REPO=$(basename `git rev-parse --show-toplevel`)
 GIT_COMMIT=$(git rev-parse HEAD)
 BUILD_TIME=$(date -u +"%Y-%m-%dT%H-%M-%SZ")
 IMAGE_NAME="keramss/$GIT_REPO:$BUILD_TIME"
+IMAGE_NAME_LATEST="keramss/$GIT_REPO:latest"
 
 cargo b -r --target x86_64-unknown-linux-musl
 cargo b -r --target aarch64-unknown-linux-musl
@@ -20,4 +21,12 @@ docker manifest create $IMAGE_NAME \
     --amend $IMAGE_NAME-amd64 \
     --amend $IMAGE_NAME-arm64
 
+docker manifest create $IMAGE_NAME_LATEST \
+    --amend $IMAGE_NAME-amd64 \
+    --amend $IMAGE_NAME-arm64
+
 docker manifest push --purge $IMAGE_NAME
+docker manifest push --purge $IMAGE_NAME_LATEST
+
+yes | hub-tool tag rm $IMAGE_NAME-amd64 || true
+yes | hub-tool tag rm $IMAGE_NAME-arm64 || true
