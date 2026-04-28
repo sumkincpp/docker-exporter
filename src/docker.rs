@@ -1,27 +1,28 @@
 mod contract {
-    #![allow(non_snake_case)]
-
     use serde::Deserialize;
     use std::collections::HashMap;
 
     #[derive(Clone, Deserialize)]
+    #[serde(rename_all = "PascalCase")]
     pub struct Container {
-        pub Id: String,
-        pub Names: Vec<String>,
+        pub id: String,
+        pub names: Vec<String>,
     }
 
     #[derive(Clone, Deserialize)]
+    #[serde(rename_all = "PascalCase")]
     pub struct ContainerState {
-        pub Running: bool,
-        pub Restarting: bool,
+        pub running: bool,
+        pub restarting: bool,
         #[serde(deserialize_with = "deserialize_null_default", default)]
-        pub StartedAt: String,
+        pub started_at: String,
     }
 
     #[derive(Clone, Deserialize)]
+    #[serde(rename_all = "PascalCase")]
     pub struct ContainerInspect {
-        pub State: ContainerState,
-        pub RestartCount: u32,
+        pub state: ContainerState,
+        pub restart_count: u32,
     }
 
     #[derive(Clone, Deserialize)]
@@ -73,35 +74,39 @@ mod contract {
     }
 
     #[derive(Clone, Deserialize)]
+    #[serde(rename_all = "PascalCase")]
     pub struct Image {
-        pub Id: String,
-        pub Containers: u32,
+        pub id: String,
+        pub containers: u32,
         #[serde(deserialize_with = "deserialize_null_default", default)]
-        pub RepoTags: Vec<String>,
-        pub Size: u64,
+        pub repo_tags: Vec<String>,
+        pub size: u64,
     }
 
     #[derive(Clone, Deserialize)]
+    #[serde(rename_all = "PascalCase")]
     pub struct VolumeUsage {
-        pub RefCount: u32,
-        pub Size: u64,
+        pub ref_count: u32,
+        pub size: u64,
     }
 
     #[derive(Clone, Deserialize)]
+    #[serde(rename_all = "PascalCase")]
     pub struct Volume {
-        pub Name: String,
-        pub Driver: String,
+        pub name: String,
+        pub driver: String,
         #[serde(deserialize_with = "deserialize_null_default", default)]
-        pub Labels: HashMap<String, String>,
-        pub UsageData: VolumeUsage,
+        pub labels: HashMap<String, String>,
+        pub usage_data: VolumeUsage,
     }
 
     #[derive(Clone, Deserialize)]
+    #[serde(rename_all = "PascalCase")]
     pub struct DataUsage {
-        pub Images: Vec<Image>,
-        pub Containers: Vec<Container>,
+        pub images: Vec<Image>,
+        pub containers: Vec<Container>,
         #[serde(deserialize_with = "deserialize_null_default", default)]
-        pub Volumes: Vec<Volume>,
+        pub volumes: Vec<Volume>,
     }
 
     fn deserialize_null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>

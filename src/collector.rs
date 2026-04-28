@@ -76,7 +76,7 @@ mod trackers {
             .unwrap();
 
             ContainerTracker {
-                id: c.Id,
+                id: c.id,
                 cpu_usage,
                 cpu_capacity,
                 memory_usage,
@@ -91,25 +91,25 @@ mod trackers {
         }
 
         fn get_display_name(c: &docker::Container) -> &str {
-            match c.Names.first() {
+            match c.names.first() {
                 Some(name) if name.trim().len() > 1 => name.trim_start_matches('/'),
-                _ => &c.Id[..12],
+                _ => &c.id[..12],
             }
         }
 
         pub async fn update<D: docker::DockerClient>(&self, docker: &D) -> Option<()> {
             let inspect = docker.inspect_container(&self.id).await?;
 
-            self.running_state.set(if inspect.State.Running {
+            self.running_state.set(if inspect.state.running {
                 1.
-            } else if inspect.State.Restarting {
+            } else if inspect.state.restarting {
                 0.5
             } else {
                 0.
             });
-            self.restart_count.set(inspect.RestartCount as f64);
+            self.restart_count.set(inspect.restart_count as f64);
 
-            if let Ok(d) = chrono::DateTime::parse_from_rfc3339(&inspect.State.StartedAt) {
+            if let Ok(d) = chrono::DateTime::parse_from_rfc3339(&inspect.state.started_at) {
                 let t = d.timestamp();
 
                 if t > 0 {
@@ -117,7 +117,7 @@ mod trackers {
                 }
             }
 
-            if !inspect.State.Running {
+            if !inspect.state.running {
                 self.memory_usage.set(0.);
                 return Some(());
             }
@@ -219,43 +219,43 @@ mod trackers {
             .unwrap();
 
             let s = VolumeTracker {
-                name: v.Name,
+                name: v.name,
                 size,
                 ref_count,
             };
 
-            Self::update(&s, v.UsageData);
+            Self::update(&s, v.usage_data);
             s
         }
 
         pub fn update(&self, v: docker::VolumeUsage) {
-            self.size.set(v.Size as f64);
-            self.ref_count.set(v.RefCount as f64);
+            self.size.set(v.size as f64);
+            self.ref_count.set(v.ref_count as f64);
         }
 
         fn metric_labels(v: &docker::Volume) -> std::collections::HashMap<String, String> {
             std::collections::HashMap::from([
-                ("name".to_owned(), v.Name.clone()),
+                ("name".to_owned(), v.name.clone()),
                 (
                     "anonymous".to_owned(),
-                    if v.Labels.contains_key("com.docker.volume.anonymous") {
+                    if v.labels.contains_key("com.docker.volume.anonymous") {
                         "true"
                     } else {
                         "false"
                     }
                     .to_owned(),
                 ),
-                ("driver".to_owned(), v.Driver.clone()),
+                ("driver".to_owned(), v.driver.clone()),
                 (
                     "compose_project".to_owned(),
-                    v.Labels
+                    v.labels
                         .get("com.docker.compose.project")
                         .cloned()
                         .unwrap_or_default(),
                 ),
                 (
                     "service".to_owned(),
-                    v.Labels
+                    v.labels
                         .get("com.docker.compose.service")
                         .cloned()
                         .unwrap_or_default(),
@@ -280,10 +280,10 @@ mod trackers {
     impl ImageTracker {
         pub fn new(i: docker::Image) -> ImageTracker {
             let tag = i
-                .RepoTags
+                .repo_tags
                 .iter()
                 .find(|x| !x.contains("<none>"))
-                .unwrap_or(&i.Id);
+                .unwrap_or(&i.id);
             let container_count = register_gauge!(opts!(
                 "docker_image_container_count",
                 "The number of containers based on an image.",
@@ -298,12 +298,12 @@ mod trackers {
             .unwrap();
 
             let s = ImageTracker {
-                id: i.Id,
+                id: i.id,
                 container_count,
                 size,
             };
 
-            Self::update(&s, i.Containers, i.Size);
+            Self::update(&s, i.containers, i.size);
             s
         }
 
@@ -389,7 +389,7 @@ impl<D: docker::DockerClient> Collector<D> {
                 .docker
                 .get_data_usage()
                 .await
-                .map(|x| (x.Containers, x.Volumes, x.Images));
+                .map(|x| (x.containers, x.volumes, x.images));
         }
 
         // List only containers when we're not collecting images or volumes - it's faster.
@@ -402,13 +402,13 @@ impl<D: docker::DockerClient> Collector<D> {
     async fn sync_container_trackers(&mut self, containers: Vec<docker::Container>) -> usize {
         let active_ids = containers
             .iter()
-            .map(|container| container.Id.clone())
+            .map(|container| container.id.clone())
             .collect::<HashSet<_>>();
         self.container_trackers
             .retain(|id, _| active_ids.contains(id));
 
         for container in containers {
-            let id = container.Id.clone();
+            let id = container.id.clone();
             self.container_trackers
                 .entry(id.clone())
                 .or_insert_with(|| {
@@ -434,15 +434,15 @@ impl<D: docker::DockerClient> Collector<D> {
     fn sync_volume_trackers(&mut self, volumes: Vec<docker::Volume>) {
         let active_names = volumes
             .iter()
-            .map(|volume| volume.Name.clone())
+            .map(|volume| volume.name.clone())
             .collect::<HashSet<_>>();
         self.volume_trackers
             .retain(|name, _| active_names.contains(name));
 
         for volume in volumes {
-            let name = volume.Name.clone();
+            let name = volume.name.clone();
             match self.volume_trackers.get(&name) {
-                Some(tracker) => tracker.update(volume.UsageData),
+                Some(tracker) => tracker.update(volume.usage_data),
                 None => {
                     debug!("Adding volume tracker {name}");
                     self.volume_trackers
@@ -455,14 +455,14 @@ impl<D: docker::DockerClient> Collector<D> {
     fn sync_image_trackers(&mut self, images: Vec<docker::Image>) {
         let active_ids = images
             .iter()
-            .map(|image| image.Id.clone())
+            .map(|image| image.id.clone())
             .collect::<HashSet<_>>();
         self.image_trackers.retain(|id, _| active_ids.contains(id));
 
         for image in images {
-            let id = image.Id.clone();
+            let id = image.id.clone();
             match self.image_trackers.get(&id) {
-                Some(tracker) => tracker.update(image.Containers, image.Size),
+                Some(tracker) => tracker.update(image.containers, image.size),
                 None => {
                     debug!("Adding image tracker {id}");
                     self.image_trackers.insert(id, ImageTracker::new(image));
@@ -495,7 +495,7 @@ mod tests {
         async fn list_containers(&self) -> Option<Vec<docker::Container>> {
             self.data_usage
                 .as_ref()
-                .map(|usage| usage.Containers.clone())
+                .map(|usage| usage.containers.clone())
         }
 
         async fn inspect_container(&self, _id: &str) -> Option<docker::ContainerInspect> {
@@ -564,34 +564,34 @@ mod tests {
         let _guard = test_guard();
         let docker = MockDockerClient {
             data_usage: Some(docker::DataUsage {
-                Containers: Vec::new(),
-                Images: Vec::new(),
-                Volumes: vec![
+                containers: Vec::new(),
+                images: Vec::new(),
+                volumes: vec![
                     docker::Volume {
-                        Name: "anon-volume".to_owned(),
-                        Driver: "local".to_owned(),
-                        Labels: std::collections::HashMap::from([(
+                        name: "anon-volume".to_owned(),
+                        driver: "local".to_owned(),
+                        labels: std::collections::HashMap::from([(
                             "com.docker.volume.anonymous".to_owned(),
                             "".to_owned(),
                         )]),
-                        UsageData: docker::VolumeUsage {
-                            RefCount: 0,
-                            Size: 0,
+                        usage_data: docker::VolumeUsage {
+                            ref_count: 0,
+                            size: 0,
                         },
                     },
                     docker::Volume {
-                        Name: "postgres_data".to_owned(),
-                        Driver: "local".to_owned(),
-                        Labels: std::collections::HashMap::from([
+                        name: "postgres_data".to_owned(),
+                        driver: "local".to_owned(),
+                        labels: std::collections::HashMap::from([
                             (
                                 "com.docker.compose.project".to_owned(),
                                 "billing".to_owned(),
                             ),
                             ("com.docker.compose.service".to_owned(), "db".to_owned()),
                         ]),
-                        UsageData: docker::VolumeUsage {
-                            RefCount: 1,
-                            Size: 2048,
+                        usage_data: docker::VolumeUsage {
+                            ref_count: 1,
+                            size: 2048,
                         },
                     },
                 ],
