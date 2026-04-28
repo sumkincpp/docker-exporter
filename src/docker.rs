@@ -1,104 +1,107 @@
 mod contract {
     #![allow(non_snake_case)]
 
-    use std::collections::HashMap;
     use serde::Deserialize;
+    use std::collections::HashMap;
 
-    #[derive(Deserialize)]
+    #[derive(Clone, Deserialize)]
     pub struct Container {
         pub Id: String,
-        pub Names: Vec<String>
+        pub Names: Vec<String>,
     }
 
-    #[derive(Deserialize)]
+    #[derive(Clone, Deserialize)]
     pub struct ContainerState {
         pub Running: bool,
         pub Restarting: bool,
         #[serde(deserialize_with = "deserialize_null_default", default)]
-        pub StartedAt: String
+        pub StartedAt: String,
     }
 
-    #[derive(Deserialize)]
+    #[derive(Clone, Deserialize)]
     pub struct ContainerInspect {
         pub State: ContainerState,
-        pub RestartCount: u32
+        pub RestartCount: u32,
     }
 
-    #[derive(Deserialize)]
+    #[derive(Clone, Deserialize)]
     pub struct MemoryStats {
         #[serde(deserialize_with = "deserialize_null_default", default)]
         pub stats: HashMap<String, u64>,
         #[serde(default)]
-        pub usage: u64
+        pub usage: u64,
     }
 
-    #[derive(Default, Deserialize)]
+    #[derive(Clone, Default, Deserialize)]
     pub struct CpuUsage {
-        pub total_usage: u64
+        pub total_usage: u64,
     }
 
-    #[derive(Deserialize)]
+    #[derive(Clone, Deserialize)]
     pub struct CpuStats {
         pub cpu_usage: CpuUsage,
         #[serde(default)]
-        pub system_cpu_usage: u64
+        pub system_cpu_usage: u64,
     }
 
-    #[derive(Deserialize)]
+    #[derive(Clone, Deserialize)]
     pub struct Network {
         pub rx_bytes: u64,
-        pub tx_bytes: u64
+        pub tx_bytes: u64,
     }
 
-    #[derive(Deserialize)]
+    #[derive(Clone, Deserialize)]
     pub struct BlkioServiceBytesStat {
         pub op: String,
-        pub value: u64
+        pub value: u64,
     }
 
-    #[derive(Default, Deserialize)]
+    #[derive(Clone, Default, Deserialize)]
     pub struct BlkioStats {
         #[serde(deserialize_with = "deserialize_null_default", default)]
-        pub io_service_bytes_recursive: Vec<BlkioServiceBytesStat>
+        pub io_service_bytes_recursive: Vec<BlkioServiceBytesStat>,
     }
 
-    #[derive(Deserialize)]
+    #[derive(Clone, Deserialize)]
     pub struct ContainerStats {
         pub cpu_stats: CpuStats,
         pub memory_stats: MemoryStats,
         #[serde(deserialize_with = "deserialize_null_default", default)]
         pub networks: HashMap<String, Network>,
         #[serde(deserialize_with = "deserialize_null_default", default)]
-        pub blkio_stats: BlkioStats
+        pub blkio_stats: BlkioStats,
     }
 
-    #[derive(Deserialize)]
+    #[derive(Clone, Deserialize)]
     pub struct Image {
         pub Id: String,
         pub Containers: u32,
         #[serde(deserialize_with = "deserialize_null_default", default)]
         pub RepoTags: Vec<String>,
-        pub Size: u64
+        pub Size: u64,
     }
 
-    #[derive(Deserialize)]
+    #[derive(Clone, Deserialize)]
     pub struct VolumeUsage {
         pub RefCount: u32,
-        pub Size: u64
+        pub Size: u64,
     }
 
-    #[derive(Deserialize)]
+    #[derive(Clone, Deserialize)]
     pub struct Volume {
         pub Name: String,
-        pub UsageData: VolumeUsage
+        pub Driver: String,
+        #[serde(deserialize_with = "deserialize_null_default", default)]
+        pub Labels: HashMap<String, String>,
+        pub UsageData: VolumeUsage,
     }
 
-    #[derive(Deserialize)]
+    #[derive(Clone, Deserialize)]
     pub struct DataUsage {
         pub Images: Vec<Image>,
         pub Containers: Vec<Container>,
         #[serde(deserialize_with = "deserialize_null_default", default)]
-        pub Volumes: Vec<Volume>
+        pub Volumes: Vec<Volume>,
     }
 
     fn deserialize_null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
@@ -111,72 +114,108 @@ mod contract {
     }
 }
 
-use std::future::Future;
-use std::time::Duration;
-use hyper::{body, Body, Client};
-use hyperlocal::{UnixClientExt, Uri, UnixConnector};
-use once_cell::sync::Lazy;
+use hyper::{Body, Client, body};
+use hyperlocal::{UnixClientExt, UnixConnector, Uri};
 use log::error;
+use std::time::Duration;
 use tokio::select;
 use tokio::time;
 
 pub use contract::*;
 
-static CLIENT: Lazy<Client<UnixConnector, Body>> = Lazy::new(|| { Client::unix() });
+const SOCKET_PATH: &str = "/var/run/docker.sock";
+const API_VERSION: &str = "/v1.44";
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const CONTAINERS_ENDPOINT: &str = "/v1.44/containers/json?all=true";
+const DATA_USAGE_ENDPOINT: &str = "/v1.44/system/df";
 
-async fn get<T: serde::de::DeserializeOwned>(endpoint: &str) -> Option<T> {
-    select! {
-        () = time::sleep(Duration::from_secs(15)) => {
-            error!("{} timed out.", endpoint);
-            None
+pub trait DockerClient: Send + Sync {
+    async fn list_containers(&self) -> Option<Vec<Container>>;
+    async fn inspect_container(&self, id: &str) -> Option<ContainerInspect>;
+    async fn get_container_stats(&self, id: &str) -> Option<ContainerStats>;
+    async fn get_data_usage(&self) -> Option<DataUsage>;
+}
+
+pub struct UnixSocketClient {
+    socket_path: String,
+    client: Client<UnixConnector, Body>,
+}
+
+impl UnixSocketClient {
+    pub fn new(socket_path: impl Into<String>) -> Self {
+        Self {
+            socket_path: socket_path.into(),
+            client: Client::unix(),
         }
-        res = CLIENT.get(Uri::new("/var/run/docker.sock", endpoint).into()) => {
-            match res {
-                Ok(res) => {
-                    let status = res.status();
-                    
-                    match body::to_bytes(res).await {
-                        Ok(body) => {
-                            if status.is_success() {
-                                match serde_json::from_slice::<T>(&body) {
-                                    Ok(res) => Some(res),
-                                    Err(e) => {
-                                        error!("{} deserialization error {} - {}", endpoint, e, String::from_utf8(body.to_vec()).unwrap());
-                                        None
-                                    }
-                                }
-                            } else {
-                                error!("{} HTTP {} - {}", endpoint, status, String::from_utf8(body.to_vec()).unwrap());
-                                None
-                            }
-                        }
-                        Err(e) => {
-                            error!("{} {}", endpoint, e);
-                            None
-                        }
-                    }
+    }
+
+    async fn get<T: serde::de::DeserializeOwned>(&self, endpoint: &str) -> Option<T> {
+        let response = select! {
+            () = time::sleep(REQUEST_TIMEOUT) => {
+                error!("{endpoint} timed out.");
+                return None;
+            }
+            response = self.client.get(Uri::new(&self.socket_path, endpoint).into()) => match response {
+                Ok(response) => response,
+                Err(error) => {
+                    error!("{endpoint} {error}");
+                    return None;
                 }
-                Err(e) => {
-                    error!("{} {}", endpoint, e);
-                    None
-                }
+            }
+        };
+
+        let status = response.status();
+        let body = match body::to_bytes(response).await {
+            Ok(body) => body,
+            Err(error) => {
+                error!("{endpoint} {error}");
+                return None;
+            }
+        };
+
+        if !status.is_success() {
+            error!(
+                "{endpoint} HTTP {status} - {}",
+                String::from_utf8_lossy(&body)
+            );
+            return None;
+        }
+
+        match serde_json::from_slice::<T>(&body) {
+            Ok(data) => Some(data),
+            Err(error) => {
+                error!(
+                    "{endpoint} deserialization error {error} - {}",
+                    String::from_utf8_lossy(&body)
+                );
+                None
             }
         }
     }
 }
 
-pub fn list_containers() -> impl Future<Output = Option<Vec<Container>>> {
-    get("/v1.44/containers/json?all=true")
+impl Default for UnixSocketClient {
+    fn default() -> Self {
+        Self::new(SOCKET_PATH)
+    }
 }
 
-pub async fn inspect_container(id: &str) -> Option<ContainerInspect> {
-    get(format!("/v1.44/containers/{id}/json").as_str()).await
-}
+impl DockerClient for UnixSocketClient {
+    async fn list_containers(&self) -> Option<Vec<Container>> {
+        self.get(CONTAINERS_ENDPOINT).await
+    }
 
-pub async fn get_container_stats(id: &str) -> Option<ContainerStats> {
-    get(format!("/v1.44/containers/{id}/stats?stream=false").as_str()).await
-}
+    async fn inspect_container(&self, id: &str) -> Option<ContainerInspect> {
+        let endpoint = format!("{API_VERSION}/containers/{id}/json");
+        self.get(&endpoint).await
+    }
 
-pub fn get_data_usage() -> impl Future<Output = Option<DataUsage>> {
-    get("/v1.44/system/df")
+    async fn get_container_stats(&self, id: &str) -> Option<ContainerStats> {
+        let endpoint = format!("{API_VERSION}/containers/{id}/stats?stream=false");
+        self.get(&endpoint).await
+    }
+
+    async fn get_data_usage(&self) -> Option<DataUsage> {
+        self.get(DATA_USAGE_ENDPOINT).await
+    }
 }

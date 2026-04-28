@@ -18,27 +18,33 @@ Configuration via environment variables:
 - `COLLECT_VOLUME_METRICS` - enables volume metrics collection (off by default)
 - `COLLECT_IMAGE_METRICS` - enables image metrics collection (off by default)
 
-To run the exporter, use docker-compose.yml:
+To run the exporter from this repository, use the included `docker-compose.yml`:
 
 ```yml
-version: '3.7'
-  services:
-    docker-exporter:
-      image: keramss/docker-exporter
-      restart: unless-stopped
-      environment:
-        # VERBOSE: 'true'
-        # COLLECT_VOLUME_METRICS: 'true'
-        # COLLECT_IMAGE_METRICS: 'true'
-      ports:
-        - "9417:9417"
-      volumes:
-        - /var/run/docker.sock:/var/run/docker.sock
+services:
+  docker-exporter:
+    build: .
+    image: docker-exporter:latest
+    restart: unless-stopped
+    environment:
+      VERBOSE: "true"
+      COLLECT_VOLUME_METRICS: "true"
+      COLLECT_IMAGE_METRICS: "true"
+    ports:
+      - "9417:9417"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 ```
 
-or the following command:
+Start it with:
 
+```sh
+docker compose up -d
 ```
+
+To run the published image directly instead, use:
+
+```sh
 docker run -d \
     --name docker-exporter \
     -p 9417:9417 \
@@ -108,11 +114,11 @@ Unix socket only. Requires that the minimum supported API version of your Docker
 
 - `docker_volume_container_count` - The number of containers using a volume.
 
-  Labels: name
+  Labels: name, anonymous, driver, compose_project, service
 
 - `docker_volume_size` - The size of a volume in bytes.
 
-  Labels: name
+  Labels: name, anonymous, driver, compose_project, service
 
 ### Images
 
