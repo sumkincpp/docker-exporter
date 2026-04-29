@@ -1,0 +1,13 @@
+services:
+  docker-exporter:
+    build: .
+    image: docker-exporter:latest
+    restart: unless-stopped
+    environment:
+      VERBOSE: "true"
+      COLLECT_VOLUME_METRICS: "true"
+      COLLECT_IMAGE_METRICS: "true"
+    ports:
+      - "9417:9417"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
