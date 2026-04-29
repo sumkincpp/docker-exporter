@@ -1,134 +1,346 @@
 use crate::Config;
 use crate::docker;
 use log::debug;
-use prometheus::{Counter, Histogram, exponential_buckets, register_counter, register_histogram};
+use prometheus::core::Collector as PromCollector;
+use prometheus::proto::MetricFamily;
+use prometheus::{
+    Counter, GaugeVec, Histogram, HistogramOpts, Opts, Registry, exponential_buckets,
+};
 use std::collections::{HashMap, HashSet};
+
+const CONTAINER_LABELS: &[&str] = &["name"];
+const VOLUME_LABELS: &[&str] = &["name", "anonymous", "driver", "compose_project", "service"];
+const IMAGE_LABELS: &[&str] = &["tag"];
+
+fn register_metric<M>(registry: &Registry, metric: M) -> M
+where
+    M: PromCollector + Clone + 'static,
+{
+    registry.register(Box::new(metric.clone())).unwrap();
+    metric
+}
+
+#[derive(Clone)]
+struct ContainerMetricSet {
+    cpu_usage: GaugeVec,
+    cpu_capacity: GaugeVec,
+    memory_usage: GaugeVec,
+    restart_count: GaugeVec,
+    running_state: GaugeVec,
+    start_time: GaugeVec,
+    total_bytes_in: GaugeVec,
+    total_bytes_out: GaugeVec,
+    total_bytes_read: GaugeVec,
+    total_bytes_written: GaugeVec,
+}
+
+impl ContainerMetricSet {
+    fn new(registry: &Registry) -> Self {
+        Self {
+            cpu_usage: register_metric(
+                registry,
+                GaugeVec::new(
+                    Opts::new(
+                        "docker_container_cpu_used_total",
+                        "Accumulated CPU usage of a container, in unspecified units, averaged for all logical CPUs usable by the container.",
+                    ),
+                    CONTAINER_LABELS,
+                )
+                .unwrap(),
+            ),
+            cpu_capacity: register_metric(
+                registry,
+                GaugeVec::new(
+                    Opts::new(
+                        "docker_container_cpu_capacity_total",
+                        "All potential CPU usage available to a container, in unspecified units, averaged for all logical CPUs usable by the container. Start point of measurement is undefined - only relative values should be used in analytics.",
+                    ),
+                    CONTAINER_LABELS,
+                )
+                .unwrap(),
+            ),
+            memory_usage: register_metric(
+                registry,
+                GaugeVec::new(
+                    Opts::new(
+                        "docker_container_memory_used_bytes",
+                        "Memory usage of a container.",
+                    ),
+                    CONTAINER_LABELS,
+                )
+                .unwrap(),
+            ),
+            restart_count: register_metric(
+                registry,
+                GaugeVec::new(
+                    Opts::new(
+                        "docker_container_restart_count",
+                        "Number of times the runtime has restarted this container without explicit user action, since the container was last started.",
+                    ),
+                    CONTAINER_LABELS,
+                )
+                .unwrap(),
+            ),
+            running_state: register_metric(
+                registry,
+                GaugeVec::new(
+                    Opts::new(
+                        "docker_container_running_state",
+                        "Whether the container is running (1), restarting (0.5) or stopped (0).",
+                    ),
+                    CONTAINER_LABELS,
+                )
+                .unwrap(),
+            ),
+            start_time: register_metric(
+                registry,
+                GaugeVec::new(
+                    Opts::new(
+                        "docker_container_start_time_seconds",
+                        "Timestamp indicating when the container was started. Does not get reset by automatic restarts.",
+                    ),
+                    CONTAINER_LABELS,
+                )
+                .unwrap(),
+            ),
+            total_bytes_in: register_metric(
+                registry,
+                GaugeVec::new(
+                    Opts::new(
+                        "docker_container_network_in_bytes",
+                        "Total bytes received by the container's network interfaces.",
+                    ),
+                    CONTAINER_LABELS,
+                )
+                .unwrap(),
+            ),
+            total_bytes_out: register_metric(
+                registry,
+                GaugeVec::new(
+                    Opts::new(
+                        "docker_container_network_out_bytes",
+                        "Total bytes sent by the container's network interfaces.",
+                    ),
+                    CONTAINER_LABELS,
+                )
+                .unwrap(),
+            ),
+            total_bytes_read: register_metric(
+                registry,
+                GaugeVec::new(
+                    Opts::new(
+                        "docker_container_disk_read_bytes",
+                        "Total bytes read from disk by a container.",
+                    ),
+                    CONTAINER_LABELS,
+                )
+                .unwrap(),
+            ),
+            total_bytes_written: register_metric(
+                registry,
+                GaugeVec::new(
+                    Opts::new(
+                        "docker_container_disk_write_bytes",
+                        "Total bytes written to disk by a container.",
+                    ),
+                    CONTAINER_LABELS,
+                )
+                .unwrap(),
+            ),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct VolumeMetricSet {
+    size: GaugeVec,
+    ref_count: GaugeVec,
+}
+
+impl VolumeMetricSet {
+    fn new(registry: &Registry) -> Self {
+        Self {
+            size: register_metric(
+                registry,
+                GaugeVec::new(
+                    Opts::new("docker_volume_size", "Size of a volume in bytes."),
+                    VOLUME_LABELS,
+                )
+                .unwrap(),
+            ),
+            ref_count: register_metric(
+                registry,
+                GaugeVec::new(
+                    Opts::new(
+                        "docker_volume_container_count",
+                        "The number of containers using a volume.",
+                    ),
+                    VOLUME_LABELS,
+                )
+                .unwrap(),
+            ),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ImageMetricSet {
+    container_count: GaugeVec,
+    size: GaugeVec,
+}
+
+impl ImageMetricSet {
+    fn new(registry: &Registry) -> Self {
+        Self {
+            container_count: register_metric(
+                registry,
+                GaugeVec::new(
+                    Opts::new(
+                        "docker_image_container_count",
+                        "The number of containers based on an image.",
+                    ),
+                    IMAGE_LABELS,
+                )
+                .unwrap(),
+            ),
+            size: register_metric(
+                registry,
+                GaugeVec::new(
+                    Opts::new("docker_image_size", "The size of on an image in bytes."),
+                    IMAGE_LABELS,
+                )
+                .unwrap(),
+            ),
+        }
+    }
+}
+
+struct Metrics {
+    registry: Registry,
+    probe_duration: Histogram,
+    probe_failures: Counter,
+    container: ContainerMetricSet,
+    volume: VolumeMetricSet,
+    image: ImageMetricSet,
+}
+
+impl Metrics {
+    fn new() -> Self {
+        let registry = Registry::new();
+        let probe_duration = register_metric(
+            &registry,
+            Histogram::with_opts(
+                HistogramOpts::new(
+                    "docker_probe_duration_seconds",
+                    "How long it takes to query Docker for the complete data set.",
+                )
+                .buckets(exponential_buckets(1.0, 2.0, 7).unwrap()),
+            )
+            .unwrap(),
+        );
+        let probe_failures = register_metric(
+            &registry,
+            Counter::new(
+                "docker_probe_failures_total",
+                "The number of times any individual Docker query failed (because of a timeout or other reasons).",
+            )
+            .unwrap(),
+        );
+
+        Self {
+            container: ContainerMetricSet::new(&registry),
+            volume: VolumeMetricSet::new(&registry),
+            image: ImageMetricSet::new(&registry),
+            registry,
+            probe_duration,
+            probe_failures,
+        }
+    }
+
+    fn gather(&self) -> Vec<MetricFamily> {
+        self.registry.gather()
+    }
+}
 
 mod trackers {
     use crate::docker;
     use log::debug;
-    use prometheus::{Gauge, Opts, labels, opts, register_gauge};
 
-    macro_rules! unregister {
-        ($($COLLECTOR: expr),+) => {{
-            $(
-                prometheus::unregister(Box::new($COLLECTOR.clone())).unwrap_or(());
-            )+
-        }};
-    }
+    use super::{ContainerMetricSet, ImageMetricSet, VolumeMetricSet};
 
     pub struct ContainerTracker {
         pub id: String,
-        cpu_usage: Gauge,
-        cpu_capacity: Gauge,
-        memory_usage: Gauge,
-        restart_count: Gauge,
-        running_state: Gauge,
-        start_time: Gauge,
-        total_bytes_in: Gauge,
-        total_bytes_out: Gauge,
-        total_bytes_read: Gauge,
-        total_bytes_written: Gauge,
+        name: String,
+        metrics: ContainerMetricSet,
     }
 
     impl ContainerTracker {
-        pub fn new(c: docker::Container) -> ContainerTracker {
-            let name = Self::get_display_name(&c);
-            let cpu_usage = register_gauge!(opts!("docker_container_cpu_used_total", "Accumulated CPU usage of a container, in unspecified units, averaged for all logical CPUs usable by the container.", labels! { "name" => name })).unwrap();
-            let cpu_capacity = register_gauge!(opts!("docker_container_cpu_capacity_total", "All potential CPU usage available to a container, in unspecified units, averaged for all logical CPUs usable by the container. Start point of measurement is undefined - only relative values should be used in analytics.", labels! { "name" => name })).unwrap();
-            let memory_usage = register_gauge!(opts!(
-                "docker_container_memory_used_bytes",
-                "Memory usage of a container.",
-                labels! { "name" => name }
-            ))
-            .unwrap();
-            let restart_count = register_gauge!(opts!("docker_container_restart_count", "Number of times the runtime has restarted this container without explicit user action, since the container was last started.", labels! { "name" => name })).unwrap();
-            let running_state = register_gauge!(opts!(
-                "docker_container_running_state",
-                "Whether the container is running (1), restarting (0.5) or stopped (0).",
-                labels! { "name" => name }
-            ))
-            .unwrap();
-            let start_time = register_gauge!(opts!("docker_container_start_time_seconds", "Timestamp indicating when the container was started. Does not get reset by automatic restarts.", labels! { "name" => name })).unwrap();
-            let total_bytes_in = register_gauge!(opts!(
-                "docker_container_network_in_bytes",
-                "Total bytes received by the container's network interfaces.",
-                labels! { "name" => name }
-            ))
-            .unwrap();
-            let total_bytes_out = register_gauge!(opts!(
-                "docker_container_network_out_bytes",
-                "Total bytes sent by the container's network interfaces.",
-                labels! { "name" => name }
-            ))
-            .unwrap();
-            let total_bytes_read = register_gauge!(opts!(
-                "docker_container_disk_read_bytes",
-                "Total bytes read from disk by a container.",
-                labels! { "name" => name }
-            ))
-            .unwrap();
-            let total_bytes_written = register_gauge!(opts!(
-                "docker_container_disk_write_bytes",
-                "Total bytes written to disk by a container.",
-                labels! { "name" => name }
-            ))
-            .unwrap();
+        pub fn new(c: docker::Container, metrics: ContainerMetricSet) -> Self {
+            let name = Self::display_name(&c).to_owned();
 
-            ContainerTracker {
+            Self {
                 id: c.id,
-                cpu_usage,
-                cpu_capacity,
-                memory_usage,
-                restart_count,
-                running_state,
-                start_time,
-                total_bytes_in,
-                total_bytes_out,
-                total_bytes_read,
-                total_bytes_written,
+                name,
+                metrics,
             }
         }
 
-        fn get_display_name(c: &docker::Container) -> &str {
+        fn display_name(c: &docker::Container) -> &str {
             match c.names.first() {
                 Some(name) if name.trim().len() > 1 => name.trim_start_matches('/'),
                 _ => &c.id[..12],
             }
         }
 
+        fn labels(&self) -> [&str; 1] {
+            [&self.name]
+        }
+
         pub async fn update<D: docker::DockerClient>(&self, docker: &D) -> Option<()> {
             let inspect = docker.inspect_container(&self.id).await?;
+            let labels = self.labels();
 
-            self.running_state.set(if inspect.state.running {
-                1.
-            } else if inspect.state.restarting {
-                0.5
-            } else {
-                0.
-            });
-            self.restart_count.set(inspect.restart_count as f64);
+            self.metrics
+                .running_state
+                .with_label_values(&labels)
+                .set(if inspect.state.running {
+                    1.
+                } else if inspect.state.restarting {
+                    0.5
+                } else {
+                    0.
+                });
+            self.metrics
+                .restart_count
+                .with_label_values(&labels)
+                .set(inspect.restart_count as f64);
 
             if let Ok(d) = chrono::DateTime::parse_from_rfc3339(&inspect.state.started_at) {
                 let t = d.timestamp();
-
                 if t > 0 {
-                    self.start_time.set(t as f64);
+                    self.metrics
+                        .start_time
+                        .with_label_values(&labels)
+                        .set(t as f64);
                 }
             }
 
             if !inspect.state.running {
-                self.memory_usage.set(0.);
+                self.metrics.memory_usage.with_label_values(&labels).set(0.);
                 return Some(());
             }
 
             let stats = docker.get_container_stats(&self.id).await?;
-            self.cpu_usage
+            self.metrics
+                .cpu_usage
+                .with_label_values(&labels)
                 .set(stats.cpu_stats.cpu_usage.total_usage as f64);
-            self.cpu_capacity
+            self.metrics
+                .cpu_capacity
+                .with_label_values(&labels)
                 .set(stats.cpu_stats.system_cpu_usage as f64);
 
-            let tmp = stats
+            let inactive_file = stats
                 .memory_stats
                 .stats
                 .get("total_inactive_file")
@@ -136,42 +348,50 @@ mod trackers {
                 .or_else(|| stats.memory_stats.stats.get("inactive_file").copied())
                 .unwrap_or_default();
 
-            self.memory_usage
-                .set((stats.memory_stats.usage - tmp) as f64);
-
-            self.total_bytes_in
-                .set(stats.networks.iter().map(|kvp| kvp.1.rx_bytes).sum::<u64>() as f64);
-            self.total_bytes_out
-                .set(stats.networks.iter().map(|kvp| kvp.1.tx_bytes).sum::<u64>() as f64);
-
-            self.total_bytes_read.set(
+            self.metrics
+                .memory_usage
+                .with_label_values(&labels)
+                .set((stats.memory_stats.usage - inactive_file) as f64);
+            self.metrics.total_bytes_in.with_label_values(&labels).set(
                 stats
-                    .blkio_stats
-                    .io_service_bytes_recursive
-                    .iter()
-                    .filter_map(|s| {
-                        if s.op.eq_ignore_ascii_case("read") {
-                            Some(s.value)
-                        } else {
-                            None
-                        }
-                    })
+                    .networks
+                    .values()
+                    .map(|network| network.rx_bytes)
                     .sum::<u64>() as f64,
             );
-            self.total_bytes_written.set(
+            self.metrics.total_bytes_out.with_label_values(&labels).set(
                 stats
-                    .blkio_stats
-                    .io_service_bytes_recursive
-                    .iter()
-                    .filter_map(|s| {
-                        if s.op.eq_ignore_ascii_case("write") {
-                            Some(s.value)
-                        } else {
-                            None
-                        }
-                    })
+                    .networks
+                    .values()
+                    .map(|network| network.tx_bytes)
                     .sum::<u64>() as f64,
             );
+            self.metrics
+                .total_bytes_read
+                .with_label_values(&labels)
+                .set(
+                    stats
+                        .blkio_stats
+                        .io_service_bytes_recursive
+                        .iter()
+                        .filter_map(|stat| {
+                            stat.op.eq_ignore_ascii_case("read").then_some(stat.value)
+                        })
+                        .sum::<u64>() as f64,
+                );
+            self.metrics
+                .total_bytes_written
+                .with_label_values(&labels)
+                .set(
+                    stats
+                        .blkio_stats
+                        .io_service_bytes_recursive
+                        .iter()
+                        .filter_map(|stat| {
+                            stat.op.eq_ignore_ascii_case("write").then_some(stat.value)
+                        })
+                        .sum::<u64>() as f64,
+                );
 
             Some(())
         }
@@ -179,144 +399,138 @@ mod trackers {
 
     impl Drop for ContainerTracker {
         fn drop(&mut self) {
+            let labels = self.labels();
             debug!("Dropping container tracker {}", self.id);
-            unregister!(
-                self.cpu_usage,
-                self.cpu_capacity,
-                self.memory_usage,
-                self.restart_count,
-                self.running_state,
-                self.start_time,
-                self.total_bytes_in,
-                self.total_bytes_out,
-                self.total_bytes_read,
-                self.total_bytes_written
-            );
+            let _ = self.metrics.cpu_usage.remove_label_values(&labels);
+            let _ = self.metrics.cpu_capacity.remove_label_values(&labels);
+            let _ = self.metrics.memory_usage.remove_label_values(&labels);
+            let _ = self.metrics.restart_count.remove_label_values(&labels);
+            let _ = self.metrics.running_state.remove_label_values(&labels);
+            let _ = self.metrics.start_time.remove_label_values(&labels);
+            let _ = self.metrics.total_bytes_in.remove_label_values(&labels);
+            let _ = self.metrics.total_bytes_out.remove_label_values(&labels);
+            let _ = self.metrics.total_bytes_read.remove_label_values(&labels);
+            let _ = self
+                .metrics
+                .total_bytes_written
+                .remove_label_values(&labels);
         }
     }
 
     pub struct VolumeTracker {
         pub name: String,
-        size: Gauge,
-        ref_count: Gauge,
+        anonymous: String,
+        driver: String,
+        compose_project: String,
+        service: String,
+        metrics: VolumeMetricSet,
     }
 
     impl VolumeTracker {
-        pub fn new(v: docker::Volume) -> VolumeTracker {
-            let volume_labels = Self::metric_labels(&v);
-            let size = register_gauge!(
-                Opts::new("docker_volume_size", "Size of a volume in bytes.")
-                    .const_labels(volume_labels.clone())
-            )
-            .unwrap();
-            let ref_count = register_gauge!(
-                Opts::new(
-                    "docker_volume_container_count",
-                    "The number of containers using a volume."
-                )
-                .const_labels(volume_labels)
-            )
-            .unwrap();
-
-            let s = VolumeTracker {
+        pub fn new(v: docker::Volume, metrics: VolumeMetricSet) -> Self {
+            let tracker = Self {
                 name: v.name,
-                size,
-                ref_count,
+                anonymous: if v.labels.contains_key("com.docker.volume.anonymous") {
+                    "true".to_owned()
+                } else {
+                    "false".to_owned()
+                },
+                driver: v.driver,
+                compose_project: v
+                    .labels
+                    .get("com.docker.compose.project")
+                    .cloned()
+                    .unwrap_or_default(),
+                service: v
+                    .labels
+                    .get("com.docker.compose.service")
+                    .cloned()
+                    .unwrap_or_default(),
+                metrics,
             };
 
-            Self::update(&s, v.usage_data);
-            s
+            tracker.update(v.usage_data);
+            tracker
         }
 
-        pub fn update(&self, v: docker::VolumeUsage) {
-            self.size.set(v.size as f64);
-            self.ref_count.set(v.ref_count as f64);
+        fn labels(&self) -> [&str; 5] {
+            [
+                &self.name,
+                &self.anonymous,
+                &self.driver,
+                &self.compose_project,
+                &self.service,
+            ]
         }
 
-        fn metric_labels(v: &docker::Volume) -> std::collections::HashMap<String, String> {
-            std::collections::HashMap::from([
-                ("name".to_owned(), v.name.clone()),
-                (
-                    "anonymous".to_owned(),
-                    if v.labels.contains_key("com.docker.volume.anonymous") {
-                        "true"
-                    } else {
-                        "false"
-                    }
-                    .to_owned(),
-                ),
-                ("driver".to_owned(), v.driver.clone()),
-                (
-                    "compose_project".to_owned(),
-                    v.labels
-                        .get("com.docker.compose.project")
-                        .cloned()
-                        .unwrap_or_default(),
-                ),
-                (
-                    "service".to_owned(),
-                    v.labels
-                        .get("com.docker.compose.service")
-                        .cloned()
-                        .unwrap_or_default(),
-                ),
-            ])
+        pub fn update(&self, usage: docker::VolumeUsage) {
+            let labels = self.labels();
+            self.metrics
+                .size
+                .with_label_values(&labels)
+                .set(usage.size as f64);
+            self.metrics
+                .ref_count
+                .with_label_values(&labels)
+                .set(usage.ref_count as f64);
         }
     }
 
     impl Drop for VolumeTracker {
         fn drop(&mut self) {
+            let labels = self.labels();
             debug!("Dropping volume tracker {}", self.name);
-            unregister!(self.size, self.ref_count);
+            let _ = self.metrics.size.remove_label_values(&labels);
+            let _ = self.metrics.ref_count.remove_label_values(&labels);
         }
     }
 
     pub struct ImageTracker {
         pub id: String,
-        container_count: Gauge,
-        size: Gauge,
+        tag: String,
+        metrics: ImageMetricSet,
     }
 
     impl ImageTracker {
-        pub fn new(i: docker::Image) -> ImageTracker {
-            let tag = i
-                .repo_tags
-                .iter()
-                .find(|x| !x.contains("<none>"))
-                .unwrap_or(&i.id);
-            let container_count = register_gauge!(opts!(
-                "docker_image_container_count",
-                "The number of containers based on an image.",
-                labels! { "tag" => tag }
-            ))
-            .unwrap();
-            let size = register_gauge!(opts!(
-                "docker_image_size",
-                "The size of on an image in bytes.",
-                labels! { "tag" => tag }
-            ))
-            .unwrap();
-
-            let s = ImageTracker {
+        pub fn new(i: docker::Image, metrics: ImageMetricSet) -> Self {
+            let tracker = Self {
+                tag: i
+                    .repo_tags
+                    .iter()
+                    .find(|tag| !tag.contains("<none>"))
+                    .cloned()
+                    .unwrap_or_else(|| i.id.clone()),
                 id: i.id,
-                container_count,
-                size,
+                metrics,
             };
 
-            Self::update(&s, i.containers, i.size);
-            s
+            tracker.update(i.containers, i.size);
+            tracker
+        }
+
+        fn labels(&self) -> [&str; 1] {
+            [&self.tag]
         }
 
         pub fn update(&self, container_count: u32, size: u64) {
-            self.container_count.set(container_count as f64);
-            self.size.set(size as f64);
+            let labels = self.labels();
+            self.metrics
+                .container_count
+                .with_label_values(&labels)
+                .set(container_count as f64);
+            self.metrics
+                .size
+                .with_label_values(&labels)
+                .set(size as f64);
         }
     }
 
     impl Drop for ImageTracker {
         fn drop(&mut self) {
+            let labels = self.labels();
             debug!("Dropping image tracker {}", self.id);
-            unregister!(self.size, self.container_count);
+            let _ = self.metrics.container_count.remove_label_values(&labels);
+            let _ = self.metrics.size.remove_label_values(&labels);
         }
     }
 }
@@ -331,45 +545,40 @@ type CollectedData = (
 
 pub struct Collector<D> {
     docker: D,
-    probe_duration: Histogram,
-    probe_failures: Counter,
+    metrics: Metrics,
     container_trackers: HashMap<String, ContainerTracker>,
     volume_trackers: HashMap<String, VolumeTracker>,
     image_trackers: HashMap<String, ImageTracker>,
 }
 
 impl<D: docker::DockerClient> Collector<D> {
-    pub fn new(docker: D) -> Collector<D> {
-        let buckets = exponential_buckets(1.0, 2.0, 7).unwrap();
-        let probe_duration = register_histogram!(
-            "docker_probe_duration_seconds",
-            "How long it takes to query Docker for the complete data set.",
-            buckets
-        )
-        .unwrap();
-        let probe_failures = register_counter!("docker_probe_failures_total", "The number of times any individual Docker query failed (because of a timeout or other reasons).").unwrap();
-
-        Collector {
+    pub fn new(docker: D) -> Self {
+        Self {
             docker,
-            probe_duration,
-            probe_failures,
+            metrics: Metrics::new(),
             container_trackers: HashMap::new(),
             volume_trackers: HashMap::new(),
             image_trackers: HashMap::new(),
         }
     }
 
+    pub fn gather(&self) -> Vec<MetricFamily> {
+        self.metrics.gather()
+    }
+
     pub async fn update(&mut self, config: &Config) -> bool {
-        let _timer = self.probe_duration.start_timer();
+        let _timer = self.metrics.probe_duration.start_timer();
 
         let Some((containers, volumes, images)) = self.collect_data(config).await else {
-            self.probe_failures.inc();
+            self.metrics.probe_failures.inc();
             return false;
         };
 
         let failed_container_updates = self.sync_container_trackers(containers).await;
         if failed_container_updates > 0 {
-            self.probe_failures.inc_by(failed_container_updates as f64);
+            self.metrics
+                .probe_failures
+                .inc_by(failed_container_updates as f64);
         }
 
         if config.collect_volume_metrics {
@@ -389,14 +598,13 @@ impl<D: docker::DockerClient> Collector<D> {
                 .docker
                 .get_data_usage()
                 .await
-                .map(|x| (x.containers, x.volumes, x.images));
+                .map(|usage| (usage.containers, usage.volumes, usage.images));
         }
 
-        // List only containers when we're not collecting images or volumes - it's faster.
         self.docker
             .list_containers()
             .await
-            .map(|x| (x, Vec::new(), Vec::new()))
+            .map(|containers| (containers, Vec::new(), Vec::new()))
     }
 
     async fn sync_container_trackers(&mut self, containers: Vec<docker::Container>) -> usize {
@@ -413,11 +621,10 @@ impl<D: docker::DockerClient> Collector<D> {
                 .entry(id.clone())
                 .or_insert_with(|| {
                     debug!("Adding container tracker {id}");
-                    ContainerTracker::new(container)
+                    ContainerTracker::new(container, self.metrics.container.clone())
                 });
         }
 
-        // Containers that are removed after the list call, but before the update below, are cleaned up next time.
         let update_results = futures::future::join_all(
             self.container_trackers
                 .values()
@@ -445,8 +652,10 @@ impl<D: docker::DockerClient> Collector<D> {
                 Some(tracker) => tracker.update(volume.usage_data),
                 None => {
                     debug!("Adding volume tracker {name}");
-                    self.volume_trackers
-                        .insert(name, VolumeTracker::new(volume));
+                    self.volume_trackers.insert(
+                        name,
+                        VolumeTracker::new(volume, self.metrics.volume.clone()),
+                    );
                 }
             }
         }
@@ -465,27 +674,18 @@ impl<D: docker::DockerClient> Collector<D> {
                 Some(tracker) => tracker.update(image.containers, image.size),
                 None => {
                     debug!("Adding image tracker {id}");
-                    self.image_trackers.insert(id, ImageTracker::new(image));
+                    self.image_trackers
+                        .insert(id, ImageTracker::new(image, self.metrics.image.clone()));
                 }
             }
         }
     }
 }
 
-impl<D> Drop for Collector<D> {
-    fn drop(&mut self) {
-        prometheus::unregister(Box::new(self.probe_duration.clone())).unwrap_or(());
-        prometheus::unregister(Box::new(self.probe_failures.clone())).unwrap_or(());
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use once_cell::sync::Lazy;
     use prometheus::{Encoder, TextEncoder};
-    use simplelog::Config as LogConfig;
-    use std::sync::{Mutex, MutexGuard};
 
     struct MockDockerClient {
         data_usage: Option<docker::DataUsage>,
@@ -511,17 +711,10 @@ mod tests {
         }
     }
 
-    static TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
-
-    fn test_guard() -> MutexGuard<'static, ()> {
-        let _ = simplelog::SimpleLogger::init(log::LevelFilter::Off, LogConfig::default());
-        TEST_LOCK.lock().unwrap()
-    }
-
-    fn volume_metric_lines() -> Vec<String> {
+    fn volume_metric_lines<D: docker::DockerClient>(collector: &Collector<D>) -> Vec<String> {
         let mut buffer = Vec::new();
         TextEncoder::new()
-            .encode(&prometheus::gather(), &mut buffer)
+            .encode(&collector.gather(), &mut buffer)
             .unwrap();
         String::from_utf8(buffer)
             .unwrap()
@@ -561,7 +754,6 @@ mod tests {
 
     #[tokio::test]
     async fn collector_uses_mocked_volume_metadata_without_socket_access() {
-        let _guard = test_guard();
         let docker = MockDockerClient {
             data_usage: Some(docker::DataUsage {
                 containers: Vec::new(),
@@ -607,7 +799,7 @@ mod tests {
 
         assert!(collector.update(&config).await);
 
-        let metrics = volume_metric_lines();
+        let metrics = volume_metric_lines(&collector);
         assert_metric_line(
             &metrics,
             "docker_volume_size",

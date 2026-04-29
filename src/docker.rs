@@ -121,7 +121,7 @@ mod contract {
 
 use hyper::{Body, Client, body};
 use hyperlocal::{UnixClientExt, UnixConnector, Uri};
-use log::error;
+use std::fmt;
 use std::time::Duration;
 use tokio::select;
 use tokio::time;
@@ -134,11 +134,55 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const CONTAINERS_ENDPOINT: &str = "/v1.44/containers/json?all=true";
 const DATA_USAGE_ENDPOINT: &str = "/v1.44/system/df";
 
+pub type DockerResult<T> = Result<T, DockerError>;
+
+#[derive(Debug, Clone)]
+pub enum DockerError {
+    Timeout {
+        endpoint: String,
+    },
+    Transport {
+        endpoint: String,
+        error: String,
+    },
+    Http {
+        endpoint: String,
+        status: u16,
+        body: String,
+    },
+    Deserialize {
+        endpoint: String,
+        error: String,
+        body: String,
+    },
+}
+
+impl fmt::Display for DockerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DockerError::Timeout { endpoint } => write!(f, "{endpoint} timed out"),
+            DockerError::Transport { endpoint, error } => {
+                write!(f, "{endpoint} transport error: {error}")
+            }
+            DockerError::Http {
+                endpoint,
+                status,
+                body,
+            } => write!(f, "{endpoint} HTTP {status}: {body}"),
+            DockerError::Deserialize {
+                endpoint,
+                error,
+                body,
+            } => write!(f, "{endpoint} deserialization error: {error}; body: {body}"),
+        }
+    }
+}
+
 pub trait DockerClient: Send + Sync {
-    async fn list_containers(&self) -> Option<Vec<Container>>;
-    async fn inspect_container(&self, id: &str) -> Option<ContainerInspect>;
-    async fn get_container_stats(&self, id: &str) -> Option<ContainerStats>;
-    async fn get_data_usage(&self) -> Option<DataUsage>;
+    async fn list_containers(&self) -> DockerResult<Vec<Container>>;
+    async fn inspect_container(&self, id: &str) -> DockerResult<ContainerInspect>;
+    async fn get_container_stats(&self, id: &str) -> DockerResult<ContainerStats>;
+    async fn get_data_usage(&self) -> DockerResult<DataUsage>;
 }
 
 pub struct UnixSocketClient {
@@ -154,17 +198,18 @@ impl UnixSocketClient {
         }
     }
 
-    async fn get<T: serde::de::DeserializeOwned>(&self, endpoint: &str) -> Option<T> {
+    async fn get<T: serde::de::DeserializeOwned>(&self, endpoint: &str) -> DockerResult<T> {
         let response = select! {
             () = time::sleep(REQUEST_TIMEOUT) => {
-                error!("{endpoint} timed out.");
-                return None;
+                return Err(DockerError::Timeout { endpoint: endpoint.to_owned() });
             }
             response = self.client.get(Uri::new(&self.socket_path, endpoint).into()) => match response {
                 Ok(response) => response,
                 Err(error) => {
-                    error!("{endpoint} {error}");
-                    return None;
+                    return Err(DockerError::Transport {
+                        endpoint: endpoint.to_owned(),
+                        error: error.to_string(),
+                    });
                 }
             }
         };
@@ -173,28 +218,28 @@ impl UnixSocketClient {
         let body = match body::to_bytes(response).await {
             Ok(body) => body,
             Err(error) => {
-                error!("{endpoint} {error}");
-                return None;
+                return Err(DockerError::Transport {
+                    endpoint: endpoint.to_owned(),
+                    error: error.to_string(),
+                });
             }
         };
 
         if !status.is_success() {
-            error!(
-                "{endpoint} HTTP {status} - {}",
-                String::from_utf8_lossy(&body)
-            );
-            return None;
+            return Err(DockerError::Http {
+                endpoint: endpoint.to_owned(),
+                status: status.as_u16(),
+                body: String::from_utf8_lossy(&body).into_owned(),
+            });
         }
 
         match serde_json::from_slice::<T>(&body) {
-            Ok(data) => Some(data),
-            Err(error) => {
-                error!(
-                    "{endpoint} deserialization error {error} - {}",
-                    String::from_utf8_lossy(&body)
-                );
-                None
-            }
+            Ok(data) => Ok(data),
+            Err(error) => Err(DockerError::Deserialize {
+                endpoint: endpoint.to_owned(),
+                error: error.to_string(),
+                body: String::from_utf8_lossy(&body).into_owned(),
+            }),
         }
     }
 }
@@ -206,21 +251,21 @@ impl Default for UnixSocketClient {
 }
 
 impl DockerClient for UnixSocketClient {
-    async fn list_containers(&self) -> Option<Vec<Container>> {
+    async fn list_containers(&self) -> DockerResult<Vec<Container>> {
         self.get(CONTAINERS_ENDPOINT).await
     }
 
-    async fn inspect_container(&self, id: &str) -> Option<ContainerInspect> {
+    async fn inspect_container(&self, id: &str) -> DockerResult<ContainerInspect> {
         let endpoint = format!("{API_VERSION}/containers/{id}/json");
         self.get(&endpoint).await
     }
 
-    async fn get_container_stats(&self, id: &str) -> Option<ContainerStats> {
+    async fn get_container_stats(&self, id: &str) -> DockerResult<ContainerStats> {
         let endpoint = format!("{API_VERSION}/containers/{id}/stats?stream=false");
         self.get(&endpoint).await
     }
 
-    async fn get_data_usage(&self) -> Option<DataUsage> {
+    async fn get_data_usage(&self) -> DockerResult<DataUsage> {
         self.get(DATA_USAGE_ENDPOINT).await
     }
 }

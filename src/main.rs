@@ -1,4 +1,3 @@
-use crate::docker::DockerClient;
 use log::{LevelFilter, info};
 use prometheus::{Encoder, TextEncoder};
 use simplelog::{Config as LogConfig, SimpleLogger};
@@ -6,6 +5,7 @@ use std::env::{self, VarError};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use tiny_http::{Header, Response, Server};
 
+#[path = "collector/mod.rs"]
 mod collector;
 mod docker;
 
@@ -55,13 +55,7 @@ async fn main() {
     let config = Config::new();
     SimpleLogger::init(config.min_log_level, LogConfig::default()).unwrap();
 
-    let docker = docker::UnixSocketClient::default();
-    docker
-        .get_data_usage()
-        .await
-        .expect("Test Docker socket query failed.");
-
-    let mut collector = collector::Collector::new(docker);
+    let mut collector = collector::Collector::new(docker::UnixSocketClient::default());
 
     let addr = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), config.port);
     let server = Server::http(addr).unwrap();
@@ -75,7 +69,7 @@ async fn main() {
         if collector.update(&config).await {
             let mut buffer = Vec::new();
             let encoder = TextEncoder::new();
-            encoder.encode(&prometheus::gather(), &mut buffer).unwrap();
+            encoder.encode(&collector.gather(), &mut buffer).unwrap();
 
             let res = Response::from_data(buffer)
                 .with_header(Header::from_bytes("Content-Type", prometheus::TEXT_FORMAT).unwrap());
